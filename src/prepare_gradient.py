@@ -1,20 +1,40 @@
 import torch
+import argparse
 import numpy as np
 import pickle
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
 import torch.nn.functional as F
-from utils import get_instruction_train, get_data_train, insert_middle, get_instruction_test1, get_instruction_test2, get_data_wiki, get_data_news
+from utils import *
 
 
-model_name = "meta-llama/Llama-3.1-8B-Instruct"
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-tokenizer.pad_token = tokenizer.eos_token
-model = AutoModelForCausalLM.from_pretrained(model_name, output_hidden_states=True).to(device)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run gradient extraction experiment")
+    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct",
+                       help="HuggingFace model name")
+    parser.add_argument("--target_text", type=str, default="Sure",
+                       help="Target text for gradient calculation")
+    parser.add_argument("--train_data_size", type=int, default=200,
+                       help="Number of training samples to use")
+    parser.add_argument("--data_type", type=str, choices=["wiki", "news"], default="wiki",
+                       help="Type of training data (wiki/news)")
+    parser.add_argument("--instruction_type", type=str, choices=["1", "2"], default="1",
+                       help="Type of instruction (1/2)")
+    return parser.parse_args()
 
+def get_data_func(data_type, is_train=True):
+    if data_type == "wiki":
+        return get_data_wiki_train() if is_train else get_data_wiki_test()
+    else:
+        return get_data_news_train() if is_train else get_data_news_test()
 
-def get_input_gradient(input_text, target_text="Yes"):
+def get_instruction_func(instruction_type, is_train=True):
+    if instruction_type == "1":
+        return get_instruction_1_train() if is_train else get_instruction_1_test()
+    else:
+        return get_instruction_2_train() if is_train else get_instruction_2_test()
+
+def get_input_gradient(input_text, target_text):
     target_shapes = {
         'self_attn.q_proj.weight': (400, 400),
         'self_attn.k_proj.weight': (100, 400),
@@ -85,85 +105,93 @@ def get_input_gradient(input_text, target_text="Yes"):
     return np.array(result_vectors)
 
 
-instructions_train = get_instruction_train()
-data_train = get_data_train()
+args = parse_args()
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+tokenizer.pad_token = tokenizer.eos_token
+model = AutoModelForCausalLM.from_pretrained(args.model_name, output_hidden_states=True).to(device)
+
+instructions_train = get_instruction_func(args.instruction_type, is_train=True)
+data_train = get_data_func(args.data_type, is_train=True)[:args.train_data_size/2]
+
 mixed_data_train = []
 for i, context in enumerate(data_train):
     attack = instructions_train[i % len(instructions_train)]
     mixed_data_train.append(insert_middle(context, attack))
-data_embeddings_train = np.array([get_input_gradient(data) for data in tqdm(data_train, desc="Processing data_train")])
+data_embeddings_train = np.array([get_input_gradient(data, args.target_text) for data in tqdm(data_train, desc="Processing data_train")])
 for layer_index in range(data_embeddings_train.shape[1]): 
     with open(f'gradients/train_data_{layer_index}.pkl', 'wb') as f:
         pickle.dump(data_embeddings_train[:,layer_index,:], f)
 del data_embeddings_train
-instruction_embeddings_train = np.array([get_input_gradient(data) for data in tqdm(mixed_data_train, desc="Processing mixed_data_train")])
+instruction_embeddings_train = np.array([get_input_gradient(data, args.target_text) for data in tqdm(mixed_data_train, desc="Processing mixed_data_train")])
 for layer_index in range(instruction_embeddings_train.shape[1]):
     with open(f'gradients/train_instruction_{layer_index}.pkl', 'wb') as f:
         pickle.dump(instruction_embeddings_train[:, layer_index, :], f)
 del instruction_embeddings_train
 
-instructions_test = get_instruction_test1()
-data_test = get_data_wiki()
+instructions_test = get_instruction_func("1", is_train=False)
+data_test = get_data_func("wiki", is_train=False)
 mixed_data_test = []
 for i, context in enumerate(data_test):
     attack = instructions_test[i % len(instructions_test)]
     mixed_data_test.append(insert_middle(context, attack))
-data_embeddings_test = np.array([get_input_gradient(data) for data in tqdm(data_test, desc="Processing data_test")])
+data_embeddings_test = np.array([get_input_gradient(data, args.target_text) for data in tqdm(data_test, desc="Processing data_test")])
 for layer_index in range(data_embeddings_test.shape[1]):
     with open(f'gradients/test_data1_{layer_index}.pkl', 'wb') as f:
         pickle.dump(data_embeddings_test[:, layer_index, :], f)
 del data_embeddings_test
-instruction_embeddings_test = np.array([get_input_gradient(data) for data in tqdm(mixed_data_test, desc="Processing mixed_data_test")])
+instruction_embeddings_test = np.array([get_input_gradient(data, args.target_text) for data in tqdm(mixed_data_test, desc="Processing mixed_data_test")])
 for layer_index in range(instruction_embeddings_test.shape[1]):
     with open(f'gradients/test_instruction1_{layer_index}.pkl', 'wb') as f:
         pickle.dump(instruction_embeddings_test[:, layer_index, :], f)
 del instruction_embeddings_test
 
-data_test = get_data_news()
+data_test = get_data_func("news", is_train=False)
 mixed_data_test = []
 for i, context in enumerate(data_test):
     attack = instructions_test[i % len(instructions_test)]
     mixed_data_test.append(insert_middle(context, attack))
-data_embeddings_test = np.array([get_input_gradient(data) for data in tqdm(data_test, desc="Processing data_test")])
+data_embeddings_test = np.array([get_input_gradient(data, args.target_text) for data in tqdm(data_test, desc="Processing data_test")])
 for layer_index in range(data_embeddings_test.shape[1]):
     with open(f'gradients/test_data2_{layer_index}.pkl', 'wb') as f:
         pickle.dump(data_embeddings_test[:, layer_index, :], f)
 del data_embeddings_test
-instruction_embeddings_test = np.array([get_input_gradient(data) for data in tqdm(mixed_data_test, desc="Processing mixed_data_test")])
+instruction_embeddings_test = np.array([get_input_gradient(data, args.target_text) for data in tqdm(mixed_data_test, desc="Processing mixed_data_test")])
 for layer_index in range(instruction_embeddings_test.shape[1]):
     with open(f'gradients/test_instruction2_{layer_index}.pkl', 'wb') as f:
         pickle.dump(instruction_embeddings_test[:, layer_index, :], f)
 del instruction_embeddings_test
 
-instructions_test = get_instruction_test2()
-data_test = get_data_wiki()
+instructions_test = get_instruction_func("2", is_train=False)
+data_test = get_data_func("wiki", is_train=False)
 mixed_data_test = []
 for i, context in enumerate(data_test):
     attack = instructions_test[i % len(instructions_test)]
     mixed_data_test.append(insert_middle(context, attack))
-data_embeddings_test = np.array([get_input_gradient(data) for data in tqdm(data_test, desc="Processing data_test")])
+data_embeddings_test = np.array([get_input_gradient(data, args.target_text) for data in tqdm(data_test, desc="Processing data_test")])
 for layer_index in range(data_embeddings_test.shape[1]):
     with open(f'gradients/test_data3_{layer_index}.pkl', 'wb') as f:
         pickle.dump(data_embeddings_test[:, layer_index, :], f)
 del data_embeddings_test
-instruction_embeddings_test = np.array([get_input_gradient(data) for data in tqdm(mixed_data_test, desc="Processing mixed_data_test")])
+instruction_embeddings_test = np.array([get_input_gradient(data, args.target_text) for data in tqdm(mixed_data_test, desc="Processing mixed_data_test")])
 for layer_index in range(instruction_embeddings_test.shape[1]):
     with open(f'gradients/test_instruction3_{layer_index}.pkl', 'wb') as f:
         pickle.dump(instruction_embeddings_test[:, layer_index, :], f)
 del instruction_embeddings_test
 
 
-data_test = get_data_news()
+data_test = get_data_func("news", is_train=False)
 mixed_data_test = []
 for i, context in enumerate(data_test):
     attack = instructions_test[i % len(instructions_test)]
     mixed_data_test.append(insert_middle(context, attack))
-data_embeddings_test = np.array([get_input_gradient(data) for data in tqdm(data_test, desc="Processing data_test")])
+data_embeddings_test = np.array([get_input_gradient(data, args.target_text) for data in tqdm(data_test, desc="Processing data_test")])
 for layer_index in range(data_embeddings_test.shape[1]):
     with open(f'gradients/test_data4_{layer_index}.pkl', 'wb') as f:
         pickle.dump(data_embeddings_test[:, layer_index, :], f)
 del data_embeddings_test
-instruction_embeddings_test = np.array([get_input_gradient(data) for data in tqdm(mixed_data_test, desc="Processing mixed_data_test")])
+instruction_embeddings_test = np.array([get_input_gradient(data, args.target_text) for data in tqdm(mixed_data_test, desc="Processing mixed_data_test")])
 for layer_index in range(instruction_embeddings_test.shape[1]):
     with open(f'gradients/test_instruction4_{layer_index}.pkl', 'wb') as f:
         pickle.dump(instruction_embeddings_test[:, layer_index, :], f)
